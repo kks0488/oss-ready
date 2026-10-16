@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -36,7 +37,8 @@ SECRET_NAME_RE = re.compile(
 )
 SAFE_SECRET_SUFFIXES = (".example", ".sample", ".template", ".dist")
 GITHUB_RE = re.compile(
-    r"(?:github\.com[:/])(?P<owner>[^/]+?)/(?P<repo>[^/]+?)(?:\.git)?$",
+    r"^(?:(?:https?|git|ssh)://(?:[^/@]+@)?github\.com/|git@github\.com:)"
+    r"(?P<owner>[A-Za-z0-9][A-Za-z0-9-]*)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
     re.IGNORECASE,
 )
 
@@ -104,7 +106,7 @@ def discover_repositories(root: Path, max_depth: int = 4) -> list[Path]:
             for name in dirs
             if name not in SKIP_DIRS and not (name.startswith(".") and name != ".git")
         ]
-        if (path / ".git").is_dir():
+        if (path / ".git").exists():
             repositories.append(path)
             dirs[:] = []
             continue
@@ -174,6 +176,8 @@ import json, os, sys
 from pathlib import Path
 
 root = Path(sys.argv[1]).expanduser().resolve()
+if not root.is_dir():
+    sys.exit("scan root is not a directory")
 max_depth = int(sys.argv[2])
 skip = {".cache", ".git", ".idea", ".next", ".npm", ".pytest_cache", ".ruff_cache", ".tox", ".venv", "Library", "backups", "build", "dist", "node_modules", "vendor"}
 found = []
@@ -182,7 +186,7 @@ for current, dirs, _files in os.walk(root):
     path = Path(current)
     depth = len(path.parts) - base_depth
     dirs[:] = [d for d in dirs if d not in skip and not (d.startswith(".") and d != ".git")]
-    if (path / ".git").is_dir():
+    if (path / ".git").exists():
         found.append(str(path))
         dirs[:] = []
     elif depth >= max_depth:
@@ -195,11 +199,12 @@ def scan_ssh(spec: str, max_depth: int = 4, show_paths: bool = False) -> list[Re
     if ":" not in spec:
         raise ValueError("SSH target must use HOST:/absolute/path")
     host, remote_root = spec.split(":", 1)
-    if not host or not remote_root.startswith("/"):
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@-]*", host) or not remote_root.startswith("/"):
         raise ValueError("SSH target must use HOST:/absolute/path")
 
     discovery = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "python3", "-", remote_root, str(max_depth)],
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host,
+         shlex.join(["python3", "-", remote_root, str(max_depth)])],
         input=REMOTE_PROGRAM,
         check=False,
         capture_output=True,
@@ -238,7 +243,8 @@ print(json.dumps({
 }))
 '''
         result = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", host, "python3", "-", remote_repo],
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host,
+             shlex.join(["python3", "-", remote_repo])],
             input=metadata_script,
             check=False,
             capture_output=True,
@@ -246,7 +252,7 @@ print(json.dumps({
             timeout=30,
         )
         if result.returncode != 0:
-            continue
+            raise RuntimeError(f"SSH metadata collection failed for {host}: {result.stderr.strip()}")
         data = json.loads(result.stdout)
         secrets = []
         for filename in data.pop("tracked"):
@@ -388,8 +394,9 @@ def score(snapshot: RepoSnapshot, owner: str | None = None) -> None:
 
 def deduplicate(snapshots: Iterable[RepoSnapshot]) -> list[RepoSnapshot]:
     selected: dict[str, RepoSnapshot] = {}
-    for snapshot in snapshots:
-        key = (snapshot.github_slug or snapshot.location).lower()
+    for index, snapshot in enumerate(snapshots):
+        # Display names are not identities: unrelated local repos can share a name.
+        key = f"github:{snapshot.github_slug.lower()}" if snapshot.github_slug else f"local:{index}"
         previous = selected.get(key)
         if previous is None or snapshot.commits > previous.commits:
             selected[key] = snapshot

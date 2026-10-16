@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,23 +41,22 @@ def main(argv: list[str] | None = None) -> int:
             snapshots.extend(scan_local(Path(root), args.max_depth, args.show_paths))
         for target in args.ssh:
             snapshots.extend(scan_ssh(target, args.max_depth, args.show_paths))
-    except (ValueError, RuntimeError) as exc:
+        snapshots = deduplicate(snapshots)
+        for snapshot in snapshots:
+            if args.github:
+                enrich_github(snapshot)
+            score(snapshot, owner=args.owner)
+        snapshots.sort(key=lambda item: (-item.score, item.github_slug or item.name))
+
+        rendered = render_json(snapshots) if args.format == "json" else render_markdown(snapshots)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered, encoding="utf-8")
+        else:
+            print(rendered, end="")
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
         print(f"oss-ready: {exc}", file=sys.stderr)
         return 2
-
-    snapshots = deduplicate(snapshots)
-    for snapshot in snapshots:
-        if args.github:
-            enrich_github(snapshot)
-        score(snapshot, owner=args.owner)
-    snapshots.sort(key=lambda item: (-item.score, item.github_slug or item.name))
-
-    rendered = render_json(snapshots) if args.format == "json" else render_markdown(snapshots)
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered, encoding="utf-8")
-    else:
-        print(rendered, end="")
     return 0
 
 
